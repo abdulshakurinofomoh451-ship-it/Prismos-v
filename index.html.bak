@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Prismos 2.0 — Editor & Engine Prototype</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{--panel-bg:rgba(10,12,18,0.9);--accent:#6EE7FF;--muted:#b9c2cf}
+    html,body{height:100%;margin:0;font-family:Inter,Segoe UI,Arial;background:#0b0f18;color:#e6eef6}
+    #app{display:flex; height:100vh; width:100vw; overflow:hidden}
+    /* Left panel (asset browser) */
+    #leftPanel{width:260px; background:var(--panel-bg); padding:12px; box-sizing:border-box; border-right:1px solid rgba(255,255,255,0.04);}
+    #leftPanel h3{margin:0 0 8px 0; font-size:14px; color:var(--accent)}
+    .asset{display:flex; gap:8px; align-items:center; padding:8px; border-radius:6px; cursor:pointer; margin-bottom:8px; background:rgba(255,255,255,0.02)}
+    .asset:hover{background:rgba(255,255,255,0.03)}
+    .asset img{width:48px;height:36px;object-fit:cover;border-radius:4px; background:#222}
+    .asset .meta{font-size:13px; color:var(--muted)}
+    /* Center canvas */
+    #center{flex:1; position:relative}
+    prismos-screen{display:block; width:100%; height:100%}
+    /* Top toolbar */
+    #toolbar{position:absolute; left:12px; top:12px; z-index:30; background:rgba(0,0,0,0.45); padding:8px; border-radius:8px;}
+    #toolbar button{margin-right:6px; padding:6px 8px; border-radius:6px; border:none; background:#15202b; color:#e6eef6; cursor:pointer}
+    /* Right inspector */
+    #rightPanel{width:320px; background:var(--panel-bg); padding:12px; box-sizing:border-box; border-left:1px solid rgba(255,255,255,0.04);}
+    #rightPanel h3{margin:0 0 8px 0; font-size:14px; color:var(--accent)}
+    .prop-row{display:flex; justify-content:space-between; margin-bottom:8px; align-items:center}
+    input[type="text"], select{width:100%; padding:6px; border-radius:6px; border:none; background:#08101a; color:#e6eef6}
+    .small{font-size:13px}
+    /* footer */
+    #footer{position:absolute; right:12px; top:12px; color:var(--muted); font-size:12px}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="leftPanel">
+      <h3>Prismos — Asset Browser</h3>
+      <div id="assets"></div>
+      <hr style="opacity:0.06;margin:10px 0"/>
+      <div>
+        <label class="small">Search</label>
+        <input id="asset-search" type="text" placeholder="Search assets..." style="width:100%;padding:6px;border-radius:6px;border:none;background:#08101a;color:#e6eef6"/>
+      </div>
+    </div>
+
+    <div id="center">
+      <div id="toolbar">
+        <button id="btn-generate">AI Generate</button>
+        <button id="btn-save">Save</button>
+        <button id="btn-export-glb">Export GLB</button>
+        <button id="btn-play">Play Mode</button>
+        <select id="style-select">
+          <option value="realistic">Realistic</option>
+          <option value="cartoon">Cartoon</option>
+          <option value="neon">Neon</option>
+        </select>
+      </div>
+
+      <prismos-screen></prismos-screen>
+
+      <div id="footer">Prismos 2.0 • Editor prototype</div>
+    </div>
+
+    <div id="rightPanel">
+      <h3>Inspector</h3>
+      <div id="inspector-content">
+        <div class="prop-row"><div class="small">Selected</div><div id="selected-name" class="small">— none —</div></div>
+        <div class="prop-row"><label class="small">Position</label><input id="pos-input" type="text" placeholder="x,y,z"/></div>
+        <div class="prop-row"><label class="small">Rotation</label><input id="rot-input" type="text" placeholder="x,y,z (deg)"/></div>
+        <div class="prop-row"><label class="small">Scale</label><input id="scale-input" type="text" placeholder="x,y,z"/></div>
+        <hr style="opacity:0.06;margin:10px 0"/>
+        <div class="prop-row"><label class="small">Weather</label>
+          <select id="weather-select"><option value="clear">Clear</option><option value="rain">Rain</option><option value="snow">Snow</option></select></div>
+        <div style="margin-top:8px;">
+          <button id="btn-add-character" class="small">Add Character</button>
+          <button id="btn-add-building" class="small">Add Building</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.164/build/three.module.js";
+    import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.164/examples/jsm/controls/OrbitControls.js";
+    import { GLTFLoader } from "https://cdn.jsdelivr.net/npm/three@0.164/examples/jsm/loaders/GLTFLoader.js";
+    import { TransformControls } from "https://cdn.jsdelivr.net/npm/three@0.164/examples/jsm/controls/TransformControls.js";
+
+    // Minimal asset catalog (URLs point to public CDN examples)
+    const ASSETS = [
+      { id: 'tree', name: 'Pine Tree', thumb: '', type:'prop', url: 'https://cdn.jsdelivr.net/npm/three@0.164/examples/models/gltf/Tree/Tree.gltf' },
+      { id: 'robot', name: 'Robot', thumb: '', type:'character', url: 'https://cdn.jsdelivr.net/npm/three@0.164/examples/models/gltf/RobotExpressive/RobotExpressive.glb' },
+      { id: 'building1', name: 'Building', thumb: '', type:'building', url: '' }
+    ];
+
+    // --- PrismosScreen element (extends previous) ---
+    class PrismosScreen extends HTMLElement {
+      constructor(){
+        super();
+
+        // Renderer & scene
+        this.renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+        this.renderer.setPixelRatio(window.devicePixelRatio);
+        this.renderer.setSize(window.innerWidth - 600, window.innerHeight); // approximate
+        this.appendChild(this.renderer.domElement);
+
+        this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(0x0b1020);
+
+        this.camera = new THREE.PerspectiveCamera(60, (window.innerWidth-600)/window.innerHeight, 0.1, 2000);
+        this.camera.position.set(0,12,18);
+
+        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+        this.controls.target.set(0,2,0);
+
+        this.ambient = new THREE.AmbientLight(0xffffff, 0.5);
+        this.scene.add(this.ambient);
+        this.dir = new THREE.DirectionalLight(0xffffff, 0.8);
+        this.dir.position.set(10,20,10); this.scene.add(this.dir);
+
+        this.worldRoot = new THREE.Group(); this.scene.add(this.worldRoot);
+
+        // Grid/ground
+        const grid = new THREE.GridHelper(200, 200, 0x444444, 0x222222);
+        grid.position.y = 0; this.scene.add(grid);
+
+        // loaders
+        this.gltfLoader = new GLTFLoader();
+
+        // transform controls
+        this.transform = new TransformControls(this.camera, this.renderer.domElement);
+        this.transform.addEventListener('dragging-changed', (e)=>{ this.controls.enabled = !e.value; });
+        this.scene.add(this.transform);
+        this.selected = null;
+
+        // weather holder
+        this.weather = { type: 'clear', particleGroup: null };
+
+        // clock
+        this.clock = new THREE.Clock();
+        const tick = ()=>{ requestAnimationFrame(tick); this.update(this.clock.getDelta()); this.renderer.render(this.scene, this.camera); };
+        tick();
+
+        window.addEventListener('resize', ()=> this.onResize());
+        // click selection
+        this.raycaster = new THREE.Raycaster();
+        this.mouse = new THREE.Vector2();
+        this.renderer.domElement.addEventListener('pointerdown', (e)=> this.onPointerDown(e));
+      }
+
+      onResize(){
+        const w = window.innerWidth - 600;
+        const h = window.innerHeight;
+        this.renderer.setSize(w, h);
+        this.camera.aspect = w/h;
+        this.camera.updateProjectionMatrix();
+      }
+
+      update(dt){
+        // rotate enemies/animated objects
+        this.worldRoot.traverse(o=>{
+          if(o.userData.rotSpeed) o.rotation.y += o.userData.rotSpeed * dt;
+        });
+        // simple weather particle update placeholder
+        if(this.weather.particleGroup){
+          this.weather.particleGroup.traverse(p=>{ if(p.userData && p.userData.vel) { p.position.add(p.userData.vel.clone().multiplyScalar(dt)); if(p.position.y<0) p.position.y = 20; } });
+        }
+      }
+
+      clearWorld(){ while(this.worldRoot.children.length) this.worldRoot.remove(this.worldRoot.children[0]); }
+
+      addAssetFromURL(url, options={position:new THREE.Vector3(0,0,0), scale:1}){
+        // loads GLTF/GLB if url ends with .glb or .gltf
+        if(!url){ // fallback simple box placeholder
+          const m = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({color:0x8899aa}));
+          m.position.copy(options.position); m.scale.setScalar(options.scale);
+          this.worldRoot.add(m); return m;
+        }
+        this.gltfLoader.load(url, (g)=>{
+          const obj = g.scene || g.scenes[0];
+          obj.traverse(n=>{ if(n.isMesh){ n.castShadow=true; n.receiveShadow=true; } });
+          obj.position.copy(options.position);
+          obj.scale.setScalar(options.scale);
+          this.worldRoot.add(obj);
+        }, undefined, (err)=>{ console.warn('asset load failed', err); });
+      }
+
+      spawnCharacterAsset(url, pos=new THREE.Vector3(0,0,0)){
+        this.addAssetFromURL(url, {position:pos, scale:1});
+      }
+
+      addBuildingPlaceholder(pos=new THREE.Vector3(0,0,0)){
+        const b = new THREE.Mesh(new THREE.BoxGeometry(3,6,3), new THREE.MeshStandardMaterial({color:0x7a7a7a}));
+        b.position.copy(pos); b.position.y = 3; this.worldRoot.add(b);
+      }
+
+      setWeather(type){
+        // clear old
+        if(this.weather.particleGroup){ this.weather.particleGroup.traverse(c=>{ if(c.geometry) c.geometry.dispose(); if(c.material) c.material.dispose(); }); this.scene.remove(this.weather.particleGroup); this.weather.particleGroup = null; }
+        this.weather.type = type;
+        if(type === 'rain' || type === 'snow'){
+          const group = new THREE.Group();
+          for(let i=0;i<300;i++){
+            const p = new THREE.Mesh(new THREE.SphereGeometry(type==='snow'?0.06:0.03,6,6), new THREE.MeshStandardMaterial({color:type==='snow'?0xffffff:0x9ec9ff, transparent:true, opacity:0.9}));
+            p.position.set((Math.random()-0.5)*100, Math.random()*20 + 5, (Math.random()-0.5)*100);
+            p.userData = { vel: new THREE.Vector3(0, type==='snow'?-0.2:-6, 0) };
+            group.add(p);
+          }
+          this.scene.add(group);
+          this.weather.particleGroup = group;
+        }
+      }
+
+      exportSceneJSON(){
+        const items = [];
+        this.worldRoot.children.forEach(o=>{
+          items.push({ name: o.name || o.type, position: o.position.toArray(), rotation: o.rotation.toArray(), scale: o.scale.toArray() });
+        });
+        return JSON.stringify({ date:new Date().toISOString(), items }, null, 2);
+      }
+
+      async exportGLB(){
+        // Attempt to use GLTFExporter if available via CDN (not included here) — fallback: return JSON
+        return new Blob([this.exportSceneJSON()], {type:'application/json'});
+      }
+
+      onPointerDown(event){
+        const rect = this.renderer.domElement.getBoundingClientRect();
+        this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        this.mouse.y = - ((event.clientY - rect.top) / rect.height) * 2 + 1;
+        this.raycaster.setFromCamera(this.mouse, this.camera);
+        const hits = this.raycaster.intersectObjects(this.worldRoot.children, true);
+        if(hits.length){
+          let pick = hits[0].object;
+          // climb to parent group
+          while(pick.parent && pick.parent !== this.worldRoot) pick = pick.parent;
+          this.selectObject(pick);
+        } else {
+          this.selectObject(null);
+        }
+      }
+
+      selectObject(obj){
+        if(this.selected === obj) return;
+        if(this.selected) this.transform.detach(this.selected);
+        this.selected = obj;
+        if(obj){
+          this.transform.attach(obj);
+          const nameEl = document.getElementById('selected-name'); nameEl.textContent = obj.name || obj.type;
+        } else {
+          const nameEl = document.getElementById('selected-name'); nameEl.textContent = '— none —';
+        }
+      }
+    }
+
+    customElements.define('prismos-screen', PrismosScreen);
+
+    // --- Bootstrapping UI ---
+    const assetsEl = document.getElementById('assets');
+    const searchEl = document.getElementById('asset-search');
+    const styleSelect = document.getElementById('style-select');
+    const weatherSelect = document.getElementById('weather-select');
+
+    function renderAssets(filter=''){
+      assetsEl.innerHTML = '';
+      ASSETS.filter(a=>a.name.toLowerCase().includes(filter.toLowerCase())).forEach(a=>{
+        const div = document.createElement('div'); div.className='asset'; div.dataset.id = a.id;
+        const img = document.createElement('img'); img.src = a.thumb || 'https://via.placeholder.com/96x64?text=asset';
+        const meta = document.createElement('div'); meta.innerHTML = '<div style="font-weight:600">'+a.name+'</div><div class="meta">'+a.type+'</div>';
+        div.appendChild(img); div.appendChild(meta);
+        div.addEventListener('click', ()=>{
+          const screen = document.querySelector('prismos-screen');
+          if(a.type === 'character') screen.spawnCharacterAsset(a.url, new THREE.Vector3((Math.random()-0.5)*20,0,(Math.random()-0.5)*20));
+          else if(a.type === 'building') screen.addBuildingPlaceholder(new THREE.Vector3((Math.random()-0.5)*20,0,(Math.random()-0.5)*20));
+          else screen.addAssetFromURL(a.url, {position:new THREE.Vector3((Math.random()-0.5)*20,0,(Math.random()-0.5)*20), scale:1});
+        });
+        assetsEl.appendChild(div);
+      });
+    }
+    renderAssets();
+
+    searchEl.addEventListener('input', (e)=> renderAssets(e.target.value));
+
+    // toolbar actions
+    document.getElementById('btn-add-character').addEventListener('click', ()=>{
+      const screen = document.querySelector('prismos-screen');
+      screen.spawnCharacterAsset(ASSETS.find(a=>a.id==='robot').url, new THREE.Vector3(0,0,0));
+    });
+
+    document.getElementById('btn-add-building').addEventListener('click', ()=>{
+      const screen = document.querySelector('prismos-screen');
+      screen.addBuildingPlaceholder(new THREE.Vector3(4,0,0));
+    });
+
+    document.getElementById('btn-save').addEventListener('click', ()=>{
+      const screen = document.querySelector('prismos-screen');
+      const blob = new Blob([screen.exportSceneJSON()], {type:'application/json'});
+      const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='prismos_scene.prismosworld'; a.click(); URL.revokeObjectURL(url);
+    });
+
+    document.getElementById('btn-export-glb').addEventListener('click', async ()=>{
+      const screen = document.querySelector('prismos-screen');
+      const blob = await screen.exportGLB();
+      const url = URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='prismos_scene.json'; a.click(); URL.revokeObjectURL(url);
+    });
+
+    document.getElementById('btn-generate').addEventListener('click', async ()=>{
+      // Simple prompt modal - call the server /api/parse if available, else fallback
+      const prompt = prompt('Describe the world to generate (e.g. "foggy mountain village with river"):','misty village with river and trees');
+      if(!prompt) return;
+      try{
+        const resp = await fetch('/api/parse', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({prompt})});
+        const data = await resp.json();
+        if(data.ok && data.parsed){
+          const screen = document.querySelector('prismos-screen');
+          screen.clearWorld();
+          // use previous generateFromParsed if exists; otherwise simple fallback loop
+          if(screen.generateFromParsed) screen.generateFromParsed(data.parsed);
+          else screen.generateFromText && screen.generateFromText(prompt);
+        } else {
+          alert('AI parse failed — server unavailable. Falling back.');
+          const screen = document.querySelector('prismos-screen'); screen.generateFromText && screen.generateFromText(prompt);
+        }
+      }catch(e){ console.warn('parse call error', e); const screen = document.querySelector('prismos-screen'); screen.generateFromText && screen.generateFromText(prompt); }
+    });
+
+    weatherSelect.addEventListener('change', (e)=>{
+      const screen = document.querySelector('prismos-screen');
+      screen.setWeather(e.target.value);
+    });
+
+    styleSelect.addEventListener('change', (e)=>{
+      // simple style switch: adjust material tints & fog
+      const val = e.target.value; const screen = document.querySelector('prismos-screen');
+      if(val === 'cartoon'){ screen.scene.fog = new THREE.Fog(0x9fc7ff, 10, 200); screen.scene.background = new THREE.Color(0x87CEEB); }
+      else if(val === 'neon'){ screen.scene.fog = new THREE.FogExp2(0x050014, 0.02); screen.scene.background = new THREE.Color(0x050014); }
+      else { screen.scene.fog = new THREE.FogExp2(0x000000, 0.005); screen.scene.background = new THREE.Color(0x0b1020); }
+    });
+
+    // Inspector fields update - simple apply transforms
+    document.getElementById('pos-input').addEventListener('change', (e)=>{
+      const screen = document.querySelector('prismos-screen');
+      const sel = screen.selected; if(!sel) return;
+      const parts = e.target.value.split(',').map(x=>parseFloat(x.trim())); if(parts.length===3){ sel.position.set(parts[0],parts[1],parts[2]); }
+    });
+    document.getElementById('rot-input').addEventListener('change', (e)=>{
+      const screen = document.querySelector('prismos-screen');
+      const sel = screen.selected; if(!sel) return;
+      const parts = e.target.value.split(',').map(x=>parseFloat(x.trim())*Math.PI/180); if(parts.length===3){ sel.rotation.set(parts[0],parts[1],parts[2]); }
+    });
+    document.getElementById('scale-input').addEventListener('change', (e)=>{
+      const screen = document.querySelector('prismos-screen');
+      const sel = screen.selected; if(!sel) return;
+      const parts = e.target.value.split(',').map(x=>parseFloat(x.trim())); if(parts.length===3){ sel.scale.set(parts[0],parts[1],parts[2]); }
+    });
+
+    // quick auto-sample
+    setTimeout(()=>{ document.getElementById('btn-generate').click(); }, 800);
+  </script>
+
+<!-- Physics (cannon-es) and Character AI integration -->
+<script type="module">
+  import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
+
+  // Simple physics bridge: create world and sync selected objects
+  (function(){
+    const proto = customElements.get('prismos-screen').prototype;
+    if(!proto._initPhysics){
+      proto._initPhysics = function(){
+        // create physics world
+        this.physicsWorld = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
+        this.physicsBodies = new Map(); // map threeObject -> body
+
+        // ground plane
+        const groundBody = new CANNON.Body({ mass: 0 });
+        const groundShape = new CANNON.Plane();
+        groundBody.addShape(groundShape);
+        groundBody.quaternion.setFromEuler(-Math.PI/2, 0, 0);
+        this.physicsWorld.addBody(groundBody);
+
+        // step configuration
+        this._fixedTimeStep = 1/60;
+        this._maxSubSteps = 3;
+
+        // hook update to step physics
+        const originalUpdate = this.update.bind(this);
+        this.update = (dt)=>{
+          // step physics
+          if(this.physicsWorld){
+            this.physicsWorld.step(this._fixedTimeStep, dt, this._maxSubSteps);
+            // sync bodies to meshes
+            for(const [mesh, body] of this.physicsBodies){
+              mesh.position.set(body.position.x, body.position.y, body.position.z);
+              mesh.quaternion.set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w);
+            }
+          }
+          // call original update (animations, AI)
+          originalUpdate(dt);
+        };
+      };
+
+      proto._addPhysicsBox = function(mesh, mass=0){
+        // create simple box body matching bounding box
+        mesh.geometry && mesh.geometry.computeBoundingBox && mesh.geometry.computeBoundingBox();
+        const bb = mesh.geometry && mesh.geometry.boundingBox;
+        const size = bb ? new CANNON.Vec3((bb.max.x-bb.min.x)/2, (bb.max.y-bb.min.y)/2, (bb.max.z-bb.min.z)/2) : new CANNON.Vec3(0.5,0.5,0.5);
+        const shape = new CANNON.Box(size);
+        const body = new CANNON.Body({ mass: mass });
+        body.addShape(shape);
+        body.position.set(mesh.position.x, mesh.position.y, mesh.position.z);
+        this.physicsWorld.addBody(body);
+        this.physicsBodies.set(mesh, body);
+        return body;
+      };
+
+      proto._removePhysicsForMesh = function(mesh){
+        const body = this.physicsBodies.get(mesh);
+        if(body){ this.physicsWorld.removeBody(body); this.physicsBodies.delete(mesh); }
+      };
+
+      // initialize physics on creation
+      const originalConn = proto.connectedCallback;
+      proto.connectedCallback = function(){
+        if(originalConn) originalConn.call(this);
+        if(!this.physicsWorld) this._initPhysics();
+      };
+    }
+
+    // Character AI: simple waypoint navigation + physics-aware steering
+    if(!proto.spawnCharacterWithAI){
+      proto.spawnCharacterWithAI = function(url, position=new THREE.Vector3(0,0,0)){
+        const name = "char_"+Math.floor(Math.random()*10000);
+        // create a simple capsule-like mesh for the character
+        const bodyMat = new THREE.MeshStandardMaterial({color:0x88ccff});
+        const bodyMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 1.0, 4, 8), bodyMat);
+        bodyMesh.position.copy(position);
+        bodyMesh.name = name;
+        this.worldRoot.add(bodyMesh);
+
+        // add physics body (kinematic)
+        const body = this._addPhysicsBox(bodyMesh, 1);
+        body.type = CANNON.Body.DYNAMIC;
+        body.fixedRotation = true;
+
+        // simple AI controller state
+        const ai = {
+          target: new THREE.Vector3((Math.random()-0.5)*20, 0, (Math.random()-0.5)*20),
+          speed: 2.5 + Math.random()*1.2,
+          wanderTimer: 0
+        };
+        body.userData = body.userData || {};
+        body.userData.ai = ai;
+        body.userData.isCharacter = true;
+
+        this.log("Character AI spawned: " + name);
+        return bodyMesh;
+      };
+    }
+
+    // Hook into the world update to drive AI
+    const origUpdate = customElements.get('prismos-screen').prototype.update;
+    customElements.get('prismos-screen').prototype.update = function(dt){
+      // run AI for each physics body with userData.ai
+      if(this.physicsBodies){
+        for(const [mesh, body] of this.physicsBodies){
+          if(body.userData && body.userData.ai){
+            const ai = body.userData.ai;
+            // compute direction to target on XZ plane
+            const target = ai.target;
+            const pos = new THREE.Vector3(body.position.x, body.position.y, body.position.z);
+            const toTarget = new THREE.Vector3(target.x - pos.x, 0, target.z - pos.z);
+            const dist = toTarget.length();
+            if(dist < 1.2){
+              // pick new target randomly
+              ai.target.set((Math.random()-0.5)*30, 0, (Math.random()-0.5)*30);
+            } else {
+              toTarget.normalize();
+              // apply velocity towards target (simple physics velocity set)
+              const vel = new CANNON.Vec3(toTarget.x * ai.speed, body.velocity.y, toTarget.z * ai.speed);
+              body.velocity.x = vel.x;
+              body.velocity.z = vel.z;
+            }
+          }
+        }
+      }
+      // call original update for other tasks
+      origUpdate.call(this, dt);
+    };
+
+  })();
+</script>
+
+
+<!-- Advanced: Navmesh Pathfinding, Animation Blending, Physics Optimizations -->
+<script type="module">
+  import { Pathfinding } from 'https://unpkg.com/three-pathfinding@0.9.1/dist/three-pathfinding.module.js';
+  import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.164/build/three.module.js';
+  import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.164/examples/jsm/loaders/GLTFLoader.js';
+
+  (function(){
+    const proto = customElements.get('prismos-screen').prototype;
+
+    // --- Physics: use SAPBroadphase if available and minor optimizations ---
+    if(proto.physicsWorld && proto.physicsWorld.broadphase === undefined && typeof CANNON !== 'undefined'){
+      try{
+        proto.physicsWorld.broadphase = new CANNON.SAPBroadphase(proto.physicsWorld);
+        proto.physicsWorld.solver.iterations = 10;
+        proto.log("Physics: SAP broadphase enabled & solver tuned.");
+      }catch(e){ /* ignore if SAP not available */ }
+    }
+
+    // Add an instanced tree generator for large forests (performance)
+    proto.addInstancedForest = function(count=200){
+      // create a simple trunk+leaves single instanced mesh pair
+      const trunkGeom = new THREE.CylinderGeometry(0.05,0.06,1,6);
+      const trunkMat = new THREE.MeshStandardMaterial({color:0x7b4f30});
+      const leavesGeom = new THREE.ConeGeometry(0.5,1.2,8);
+      const leavesMat = new THREE.MeshStandardMaterial({color:0x1e6b2b});
+      const trunks = new THREE.InstancedMesh(trunkGeom, trunkMat, count);
+      const leaves = new THREE.InstancedMesh(leavesGeom, leavesMat, count);
+      const dummy = new THREE.Object3D();
+      for(let i=0;i<count;i++){
+        const x=(Math.random()-0.5)*80, z=(Math.random()-0.5)*80, y=0.6;
+        dummy.position.set(x,y,z);
+        dummy.updateMatrix();
+        trunks.setMatrixAt(i, dummy.matrix);
+        dummy.position.y = 1.3;
+        dummy.updateMatrix();
+        leaves.setMatrixAt(i, dummy.matrix);
+      }
+      trunks.instanceMatrix.needsUpdate = true;
+      leaves.instanceMatrix.needsUpdate = true;
+      trunks.name="instanced_trunks";
+      leaves.name="instanced_leaves";
+      this.worldRoot.add(trunks);
+      this.worldRoot.add(leaves);
+      this.log("Instanced forest added ("+count+")");
+    };
+
+    // --- Character animation blending & proper GLTF loading ---
+    if(!proto._setupAnimationForGLTF){
+      proto._setupAnimationForGLTF = function(gltf, meshRoot){
+        // create mixer and actions map on the returned meshRoot
+        meshRoot.userData.mixer = new THREE.AnimationMixer(meshRoot);
+        meshRoot.userData.actions = {};
+        if(gltf.animations && gltf.animations.length){
+          // create actions for all animations (name-based)
+          gltf.animations.forEach(clip => {
+            const action = meshRoot.userData.mixer.clipAction(clip);
+            meshRoot.userData.actions[clip.name.toLowerCase()] = action;
+          });
+          // set idle/walk/run using heuristics if available
+          const actions = meshRoot.userData.actions;
+          if(actions['idle']) actions['idle'].play();
+          else {
+            // try to play first animation as idle
+            const first = Object.values(actions)[0];
+            if(first) first.play();
+          }
+        }
+        // store for update loop
+        this._characterMixers = this._characterMixers || [];
+        this._characterMixers.push(meshRoot.userData.mixer);
+      };
+    }
+
+    // Override spawnCharacterAsset to support animation blending
+    const origSpawn = proto.spawnCharacterAsset;
+    proto.spawnCharacterAsset = function(url, pos=new THREE.Vector3(0,0,0)){
+      // if gltf/glb, load and attach mixer/actions
+      const loader = new GLTFLoader();
+      loader.load(url, (g)=>{
+        const obj = g.scene || g.scenes[0];
+        obj.position.copy(pos);
+        obj.traverse(n=>{ if(n.isMesh){ n.castShadow=true; n.receiveShadow=true; } });
+        this.worldRoot.add(obj);
+        // setup animations
+        this._setupAnimationForGLTF(g, obj);
+        // add physics body for root if possible
+        try{ this._addPhysicsBox(obj, 1); }catch(e){}
+        this.log("Character asset loaded with animations: " + (g.animations?g.animations.length:0));
+      }, undefined, (err)=>{
+        // fallback to old behavior
+        origSpawn.call(this, url, pos);
+      });
+    };
+
+    // Attach update to advance mixers and optimized physics sync
+    const originalUpdate = proto.update;
+    proto.update = function(dt){
+      // advance all character mixers
+      if(this._characterMixers && this._characterMixers.length){
+        this._characterMixers.forEach(m => m.update(dt));
+      }
+      // optimized physics sync: only sync visible/nearby bodies
+      if(this.physicsBodies && this.camera){
+        const camPos = this.camera.position;
+        for(const [mesh, body] of this.physicsBodies){
+          const dx = mesh.position.x - camPos.x;
+          const dz = mesh.position.z - camPos.z;
+          const dist2 = dx*dx + dz*dz;
+          // skip sync for objects > 250 units away (reduce workload)
+          if(dist2 > 250*250) continue;
+          // sync mesh with body as before
+          mesh.position.set(body.position.x, body.position.y, body.position.z);
+          mesh.quaternion.set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w);
+        }
+      }
+      // run original update (AI, rotations, etc.)
+      originalUpdate.call(this, dt);
+    };
+
+    // --- Navmesh / pathfinding integration (three-pathfinding) ---
+    proto._pathfinding = proto._pathfinding || new Pathfinding();
+    proto.loadNavMesh = function(navmeshUrl, zoneName='level'){
+      // load a navmesh GLB that contains a mesh named 'navmesh' or first mesh
+      const loader = new GLTFLoader();
+      loader.load(navmeshUrl, (g)=>{
+        const nav = g.scene.getObjectByName('navmesh') || g.scene.children[0];
+        if(!nav){ this.log("Navmesh not found in GLB"); return; }
+        // build zone
+        this._pathfinding.setZoneData(zoneName, Pathfinding.createZone(nav.geometry));
+        this.log("Navmesh loaded and zone created: " + zoneName);
+      }, undefined, (err)=>{ this.log("Navmesh load failed: " + err.message); });
+    };
+
+    // find a path for a character mesh to a destination
+    proto.moveCharacterTo = function(characterMesh, destination, zoneName='level'){
+      if(!characterMesh) return;
+      const groupID = this._pathfinding.getGroup(zoneName, characterMesh.position);
+      const closest = this._pathfinding.getClosestNode(characterMesh.position, zoneName, groupID);
+      const targetGroup = this._pathfinding.getGroup(zoneName, destination);
+      const path = this._pathfinding.findPath(characterMesh.position, destination, zoneName, groupID);
+      if(path && path.length){
+        // simple path following: set userData.path and index
+        characterMesh.userData.path = path;
+        characterMesh.userData.pathIndex = 0;
+        this.log("Path assigned (len="+path.length+") to character");
+      } else {
+        this.log("No path found for character.");
+      }
+    };
+
+    // step path following for characters
+    const origUpdate2 = proto.update;
+    proto.update = function(dt){
+      // follow assigned paths
+      this.worldRoot.traverse(obj=>{
+        if(obj.userData && obj.userData.path){
+          const path = obj.userData.path;
+          const idx = obj.userData.pathIndex || 0;
+          if(idx < path.length){
+            const target = new THREE.Vector3(path[idx].x, path[idx].y, path[idx].z);
+            const dir = target.clone().sub(obj.position);
+            dir.y = 0;
+            const dist = dir.length();
+            if(dist < 0.5){ obj.userData.pathIndex = idx + 1; }
+            else {
+              dir.normalize();
+              // apply simple translation toward target (kinematic movement)
+              obj.position.add(dir.multiplyScalar(2.0 * dt));
+              // play walk animation if available
+              if(obj.userData.mixer && obj.userData.actions){
+                const actions = obj.userData.actions;
+                if(actions['walk'] && !actions['walk'].isRunning()){ actions['walk'].reset().fadeIn(0.2).play(); }
+              }
+            }
+          } else {
+            // reached destination, play idle
+            if(obj.userData.actions && obj.userData.actions['idle']){
+              obj.userData.actions['idle'].reset().fadeIn(0.2).play();
+            }
+            delete obj.userData.path;
+          }
+        }
+      });
+      // call previous update
+      origUpdate2.call(this, dt);
+    };
+
+    // attach utility to create many instanced props (tree pooling)
+    proto.createTreePool = function(poolSize=300){
+      // create instanced meshes and store
+      if(this._treePool) return;
+      const geom = new THREE.ConeGeometry(0.5,1.2,8);
+      const mat = new THREE.MeshStandardMaterial({color:0x1e6b2b});
+      const inst = new THREE.InstancedMesh(geom, mat, poolSize);
+      inst.count = poolSize;
+      for(let i=0;i<poolSize;i++){
+        const dummy = new THREE.Object3D();
+        dummy.position.set(9999,9999,9999); dummy.updateMatrix();
+        inst.setMatrixAt(i, dummy.matrix);
+      }
+      inst.instanceMatrix.needsUpdate = true;
+      inst.name = 'tree_pool';
+      this._treePool = { mesh: inst, size: poolSize, used: 0 };
+      this.worldRoot.add(inst);
+      this.log("Tree pool created ("+poolSize+")");
+    };
+
+    proto.placeTreeFromPool = function(x,z){
+      if(!this._treePool) this.createTreePool(300);
+      const pool = this._treePool;
+      if(pool.used >= pool.size) return;
+      const i = pool.used++;
+      const dummy = new THREE.Object3D();
+      dummy.position.set(x, 0.8, z);
+      dummy.updateMatrix();
+      pool.mesh.setMatrixAt(i, dummy.matrix);
+      pool.mesh.instanceMatrix.needsUpdate = true;
+    };
+
+  })();
+</script>
+
+</body>
+</html>
